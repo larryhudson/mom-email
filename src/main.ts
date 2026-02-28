@@ -1,32 +1,36 @@
 #!/usr/bin/env node
 
-import { join, resolve } from "path";
-import { type AgentRunner, getOrCreateRunner } from "./agent.js";
-import { downloadChannel } from "./download.js";
+import "dotenv/config";
+import { resolve } from "path";
+import { runAgent } from "./agent.js";
+import { createEmailServer, type ParsedEmail } from "./email-server.js";
+import { EmailStore, type StoredEmail } from "./email-store.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
+import { sendEmail, validateMailgunCredentials, type MailgunConfig } from "./mailgun.js";
+import { ProcessingQueue } from "./queue.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
-import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
-import { ChannelStore } from "./store.js";
 
 // ============================================================================
 // Config
 // ============================================================================
 
-const MOM_SLACK_APP_TOKEN = process.env.MOM_SLACK_APP_TOKEN;
-const MOM_SLACK_BOT_TOKEN = process.env.MOM_SLACK_BOT_TOKEN;
+const MAILGUN_API_KEY = process.env.MAILGUN_API_KEY;
+const MAILGUN_DOMAIN = process.env.MAILGUN_DOMAIN;
+const MAILGUN_FROM_ADDRESS = process.env.MAILGUN_FROM_ADDRESS;
+const MAILGUN_SIGNING_KEY = process.env.MAILGUN_SIGNING_KEY;
+const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
+const TRIGGER_PHRASE = process.env.TRIGGER_PHRASE || "@Claude";
 
 interface ParsedArgs {
 	workingDir?: string;
 	sandbox: SandboxConfig;
-	downloadChannel?: string;
 }
 
 function parseArgs(): ParsedArgs {
 	const args = process.argv.slice(2);
 	let sandbox: SandboxConfig = { type: "host" };
 	let workingDir: string | undefined;
-	let downloadChannelId: string | undefined;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -34,10 +38,6 @@ function parseArgs(): ParsedArgs {
 			sandbox = parseSandboxArg(arg.slice("--sandbox=".length));
 		} else if (arg === "--sandbox") {
 			sandbox = parseSandboxArg(args[++i] || "");
-		} else if (arg.startsWith("--download=")) {
-			downloadChannelId = arg.slice("--download=".length);
-		} else if (arg === "--download") {
-			downloadChannelId = args[++i];
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -46,277 +46,214 @@ function parseArgs(): ParsedArgs {
 	return {
 		workingDir: workingDir ? resolve(workingDir) : undefined,
 		sandbox,
-		downloadChannel: downloadChannelId,
 	};
 }
 
 const parsedArgs = parseArgs();
 
-// Handle --download mode
-if (parsedArgs.downloadChannel) {
-	if (!MOM_SLACK_BOT_TOKEN) {
-		console.error("Missing env: MOM_SLACK_BOT_TOKEN");
-		process.exit(1);
-	}
-	await downloadChannel(parsedArgs.downloadChannel, MOM_SLACK_BOT_TOKEN);
-	process.exit(0);
-}
-
-// Normal bot mode - require working dir
 if (!parsedArgs.workingDir) {
 	console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
-	console.error("       mom --download <channel-id>");
 	process.exit(1);
 }
 
 const { workingDir, sandbox } = { workingDir: parsedArgs.workingDir, sandbox: parsedArgs.sandbox };
 
-if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
-	console.error("Missing env: MOM_SLACK_APP_TOKEN, MOM_SLACK_BOT_TOKEN");
+if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN || !MAILGUN_FROM_ADDRESS) {
+	console.error("Missing env: MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_FROM_ADDRESS");
 	process.exit(1);
 }
+
+const mailgunApiKey: string = MAILGUN_API_KEY;
+const mailgunDomain: string = MAILGUN_DOMAIN;
+const mailgunFromAddress: string = MAILGUN_FROM_ADDRESS;
 
 await validateSandbox(sandbox);
 
 // ============================================================================
-// State (per channel)
+// Setup
 // ============================================================================
 
-interface ChannelState {
-	running: boolean;
-	runner: AgentRunner;
-	store: ChannelStore;
-	stopRequested: boolean;
-	stopMessageTs?: string;
-}
-
-const channelStates = new Map<string, ChannelState>();
-
-function getState(channelId: string): ChannelState {
-	let state = channelStates.get(channelId);
-	if (!state) {
-		const channelDir = join(workingDir, channelId);
-		state = {
-			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir),
-			store: new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! }),
-			stopRequested: false,
-		};
-		channelStates.set(channelId, state);
-	}
-	return state;
-}
-
-// ============================================================================
-// Create SlackContext adapter
-// ============================================================================
-
-function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
-	let messageTs: string | null = null;
-	const threadMessageTs: string[] = [];
-	let accumulatedText = "";
-	let isWorking = true;
-	const workingIndicator = " ...";
-	let updatePromise = Promise.resolve();
-
-	const user = slack.getUser(event.user);
-
-	// Extract event filename for status message
-	const eventFilename = isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
-
-	return {
-		message: {
-			text: event.text,
-			rawText: event.text,
-			user: event.user,
-			userName: user?.userName,
-			channel: event.channel,
-			ts: event.ts,
-			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
-		},
-		channelName: slack.getChannel(event.channel)?.name,
-		store: state.store,
-		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),
-		users: slack.getAllUsers().map((u) => ({ id: u.id, userName: u.userName, displayName: u.displayName })),
-
-		respond: async (text: string, shouldLog = true) => {
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-
-				if (messageTs) {
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
-					messageTs = await slack.postMessage(event.channel, displayText);
-				}
-
-				if (shouldLog && messageTs) {
-					slack.logBotResponse(event.channel, text, messageTs);
-				}
-			});
-			await updatePromise;
-		},
-
-		replaceMessage: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				accumulatedText = text;
-				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-				if (messageTs) {
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
-					messageTs = await slack.postMessage(event.channel, displayText);
-				}
-			});
-			await updatePromise;
-		},
-
-		respondInThread: async (text: string) => {
-			updatePromise = updatePromise.then(async () => {
-				if (messageTs) {
-					const ts = await slack.postInThread(event.channel, messageTs, text);
-					threadMessageTs.push(ts);
-				}
-			});
-			await updatePromise;
-		},
-
-		setTyping: async (isTyping: boolean) => {
-			if (isTyping && !messageTs) {
-				updatePromise = updatePromise.then(async () => {
-					if (!messageTs) {
-						accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-						messageTs = await slack.postMessage(event.channel, accumulatedText + workingIndicator);
-					}
-				});
-				await updatePromise;
-			}
-		},
-
-		uploadFile: async (filePath: string, title?: string) => {
-			await slack.uploadFile(event.channel, filePath, title);
-		},
-
-		setWorking: async (working: boolean) => {
-			updatePromise = updatePromise.then(async () => {
-				isWorking = working;
-				if (messageTs) {
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
-					await slack.updateMessage(event.channel, messageTs, displayText);
-				}
-			});
-			await updatePromise;
-		},
-
-		deleteMessage: async () => {
-			updatePromise = updatePromise.then(async () => {
-				// Delete thread messages first (in reverse order)
-				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
-					try {
-						await slack.deleteMessage(event.channel, threadMessageTs[i]);
-					} catch {
-						// Ignore errors deleting thread messages
-					}
-				}
-				threadMessageTs.length = 0;
-				// Then delete main message
-				if (messageTs) {
-					await slack.deleteMessage(event.channel, messageTs);
-					messageTs = null;
-				}
-			});
-			await updatePromise;
-		},
-	};
-}
-
-// ============================================================================
-// Handler
-// ============================================================================
-
-const handler: MomHandler = {
-	isRunning(channelId: string): boolean {
-		const state = channelStates.get(channelId);
-		return state?.running ?? false;
-	},
-
-	async handleStop(channelId: string, slack: SlackBot): Promise<void> {
-		const state = channelStates.get(channelId);
-		if (state?.running) {
-			state.stopRequested = true;
-			state.runner.abort();
-			const ts = await slack.postMessage(channelId, "_Stopping..._");
-			state.stopMessageTs = ts; // Save for updating later
-		} else {
-			await slack.postMessage(channelId, "_Nothing running_");
-		}
-	},
-
-	async handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void> {
-		const state = getState(event.channel);
-
-		// Start run
-		state.running = true;
-		state.stopRequested = false;
-
-		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
-
-		try {
-			// Create context adapter
-			const ctx = createSlackContext(event, slack, state, isEvent);
-
-			// Run the agent
-			await ctx.setTyping(true);
-			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
-			await ctx.setWorking(false);
-
-			if (result.stopReason === "aborted" && state.stopRequested) {
-				if (state.stopMessageTs) {
-					await slack.updateMessage(event.channel, state.stopMessageTs, "_Stopped_");
-					state.stopMessageTs = undefined;
-				} else {
-					await slack.postMessage(event.channel, "_Stopped_");
-				}
-			}
-		} catch (err) {
-			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
-		} finally {
-			state.running = false;
-		}
-	},
+const mailgunConfig: MailgunConfig = {
+	apiKey: mailgunApiKey,
+	domain: mailgunDomain,
+	fromAddress: mailgunFromAddress,
 };
 
-// ============================================================================
-// Start
-// ============================================================================
+const emailStore = new EmailStore(workingDir);
 
 log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
 
-// Shared store for attachment downloads (also used per-channel in getState)
-const sharedStore = new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! });
+// Validate Mailgun credentials before starting
+try {
+	await validateMailgunCredentials(mailgunConfig);
+} catch (err) {
+	const msg = err instanceof Error ? err.message : String(err);
+	console.error(`Mailgun validation failed: ${msg}`);
+	process.exit(1);
+}
 
-const bot = new SlackBotClass(handler, {
-	appToken: MOM_SLACK_APP_TOKEN,
-	botToken: MOM_SLACK_BOT_TOKEN,
-	workingDir,
-	store: sharedStore,
+// ============================================================================
+// Processing Queue
+// ============================================================================
+
+const queue = new ProcessingQueue(async (emailId: string) => {
+	const email = emailStore.get(emailId);
+	if (!email) {
+		log.logWarning(`Email not found for processing: ${emailId}`);
+		return;
+	}
+
+	log.logEmailProcessing(email.from, email.subject);
+
+	// Gather recent context emails (last 50 emails for context)
+	const recentEntries = emailStore.getRecent({ limit: 50 });
+	const recentIds = recentEntries
+		.filter((e) => e.id !== emailId)
+		.map((e) => e.id);
+	const recentEmails = emailStore.getMany(recentIds);
+
+	try {
+		const result = await runAgent(sandbox, workingDir, {
+			triggeredEmail: email,
+			recentEmails,
+		}, TRIGGER_PHRASE);
+
+		// Check for [SILENT] marker
+		if (result.replyText.trim() === "[SILENT]" || result.replyText.trim().startsWith("[SILENT]")) {
+			log.logInfo(`Silent response for email ${emailId} -- no reply sent`);
+		} else if (result.replyText.trim()) {
+			// Build threading headers
+			const references = email.references
+				? `${email.references} ${email.messageId}`
+				: email.messageId;
+
+			await sendEmail(mailgunConfig, {
+				to: email.from,
+				subject: email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`,
+				text: result.replyText,
+				inReplyTo: email.messageId,
+				references,
+				attachments: result.attachments.length > 0 ? result.attachments : undefined,
+			});
+
+			log.logEmailReply(email.from, email.subject);
+		} else {
+			log.logWarning(`Empty response for email ${emailId} -- no reply sent`);
+		}
+
+		// Mark as processed
+		await emailStore.markProcessed(emailId);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		log.logWarning(`Failed to process email ${emailId}`, msg);
+	}
 });
 
-// Start events watcher
-const eventsWatcher = createEventsWatcher(workingDir, bot);
+// ============================================================================
+// Webhook Handler
+// ============================================================================
+
+async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
+	// Generate stable ID from Message-Id
+	const id = EmailStore.hashMessageId(parsed.messageId);
+
+	// Check for trigger phrase in stripped text (avoids false triggers from quoted replies)
+	const triggerRegex = new RegExp(TRIGGER_PHRASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+	const triggered = triggerRegex.test(parsed.strippedText);
+
+	// Build stored email
+	const storedEmail: StoredEmail = {
+		id,
+		messageId: parsed.messageId,
+		inReplyTo: parsed.inReplyTo,
+		references: parsed.references,
+		from: parsed.sender || parsed.from,
+		to: mailgunFromAddress,
+		subject: parsed.subject,
+		date: parsed.date,
+		receivedAt: new Date().toISOString(),
+		bodyPlain: parsed.bodyPlain,
+		strippedText: parsed.strippedText,
+		bodyHtml: parsed.bodyHtml,
+		triggered,
+		processed: false,
+		attachments: [],
+	};
+
+	// Save to store
+	await emailStore.save(storedEmail);
+
+	if (triggered) {
+		log.logInfo(`Trigger phrase "${TRIGGER_PHRASE}" detected in email from ${parsed.from}`);
+		queue.enqueue(id);
+	} else {
+		log.logInfo(`Email stored (no trigger): ${parsed.from} - ${parsed.subject}`);
+	}
+}
+
+// ============================================================================
+// Events Watcher
+// ============================================================================
+
+const eventsWatcher = createEventsWatcher(workingDir, (text: string, _filename: string): boolean => {
+	// Create a synthetic triggered email for the event
+	const eventId = `event_${Date.now()}`;
+	const syntheticEmail: StoredEmail = {
+		id: eventId,
+		messageId: `<${eventId}@events>`,
+		from: "system@events",
+		to: mailgunFromAddress,
+		subject: "Scheduled Event",
+		date: new Date().toISOString(),
+		receivedAt: new Date().toISOString(),
+		bodyPlain: text,
+		strippedText: text,
+		triggered: true,
+		processed: false,
+		attachments: [],
+	};
+
+	// Save and enqueue
+	emailStore.save(syntheticEmail).then(() => {
+		queue.enqueue(eventId);
+	}).catch((err) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log.logWarning("Failed to enqueue event", msg);
+	});
+
+	return true;
+});
+
 eventsWatcher.start();
 
-// Handle shutdown
+// ============================================================================
+// Start Server
+// ============================================================================
+
+const emailServer = createEmailServer({
+	port: WEBHOOK_PORT,
+	signingKey: MAILGUN_SIGNING_KEY,
+	onEmail: handleIncomingEmail,
+});
+
+emailServer.start();
+
+log.logConnected();
+
+// ============================================================================
+// Shutdown
+// ============================================================================
+
 process.on("SIGINT", () => {
 	log.logInfo("Shutting down...");
+	emailServer.stop();
 	eventsWatcher.stop();
 	process.exit(0);
 });
 
 process.on("SIGTERM", () => {
 	log.logInfo("Shutting down...");
+	emailServer.stop();
 	eventsWatcher.stop();
 	process.exit(0);
 });
-
-bot.start();

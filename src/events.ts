@@ -3,7 +3,6 @@ import { existsSync, type FSWatcher, mkdirSync, readdirSync, statSync, unlinkSyn
 import { readFile } from "fs/promises";
 import { join } from "path";
 import * as log from "./log.js";
-import type { SlackBot, SlackEvent } from "./slack.js";
 
 // ============================================================================
 // Event Types
@@ -11,26 +10,31 @@ import type { SlackBot, SlackEvent } from "./slack.js";
 
 export interface ImmediateEvent {
 	type: "immediate";
-	channelId: string;
 	text: string;
 }
 
 export interface OneShotEvent {
 	type: "one-shot";
-	channelId: string;
 	text: string;
 	at: string; // ISO 8601 with timezone offset
 }
 
 export interface PeriodicEvent {
 	type: "periodic";
-	channelId: string;
 	text: string;
 	schedule: string; // cron syntax
 	timezone: string; // IANA timezone
 }
 
 export type MomEvent = ImmediateEvent | OneShotEvent | PeriodicEvent;
+
+/**
+ * Callback when an event fires.
+ * @param text - The formatted event message
+ * @param filename - The event filename
+ * @returns true if the event was accepted, false if rejected (e.g., queue full)
+ */
+export type OnEventCallback = (text: string, filename: string) => boolean;
 
 // ============================================================================
 // EventsWatcher
@@ -50,13 +54,13 @@ export class EventsWatcher {
 
 	constructor(
 		private eventsDir: string,
-		private slack: SlackBot,
+		private onEvent: OnEventCallback,
 	) {
 		this.startTime = Date.now();
 	}
 
 	/**
-	 * Start watching for events. Call this after SlackBot is ready.
+	 * Start watching for events.
 	 */
 	start(): void {
 		// Ensure events directory exists
@@ -221,19 +225,19 @@ export class EventsWatcher {
 	private parseEvent(content: string, filename: string): MomEvent | null {
 		const data = JSON.parse(content);
 
-		if (!data.type || !data.channelId || !data.text) {
-			throw new Error(`Missing required fields (type, channelId, text) in ${filename}`);
+		if (!data.type || !data.text) {
+			throw new Error(`Missing required fields (type, text) in ${filename}`);
 		}
 
 		switch (data.type) {
 			case "immediate":
-				return { type: "immediate", channelId: data.channelId, text: data.text };
+				return { type: "immediate", text: data.text };
 
 			case "one-shot":
 				if (!data.at) {
 					throw new Error(`Missing 'at' field for one-shot event in ${filename}`);
 				}
-				return { type: "one-shot", channelId: data.channelId, text: data.text, at: data.at };
+				return { type: "one-shot", text: data.text, at: data.at };
 
 			case "periodic":
 				if (!data.schedule) {
@@ -244,7 +248,6 @@ export class EventsWatcher {
 				}
 				return {
 					type: "periodic",
-					channelId: data.channelId,
 					text: data.text,
 					schedule: data.schedule,
 					timezone: data.timezone,
@@ -332,24 +335,13 @@ export class EventsWatcher {
 
 		const message = `[EVENT:${filename}:${event.type}:${scheduleInfo}] ${event.text}`;
 
-		// Create synthetic SlackEvent
-		const syntheticEvent: SlackEvent = {
-			type: "mention",
-			channel: event.channelId,
-			user: "EVENT",
-			text: message,
-			ts: Date.now().toString(),
-		};
+		// Call the generic callback
+		const accepted = this.onEvent(message, filename);
 
-		// Enqueue for processing
-		const enqueued = this.slack.enqueueEvent(syntheticEvent);
-
-		if (enqueued && deleteAfter) {
-			// Delete file after successful enqueue (immediate and one-shot)
+		if (accepted && deleteAfter) {
 			this.deleteFile(filename);
-		} else if (!enqueued) {
+		} else if (!accepted) {
 			log.logWarning(`Event queue full, discarded: ${filename}`);
-			// Still delete immediate/one-shot even if discarded
 			if (deleteAfter) {
 				this.deleteFile(filename);
 			}
@@ -362,7 +354,7 @@ export class EventsWatcher {
 			unlinkSync(filePath);
 		} catch (err) {
 			// ENOENT is fine (file already deleted), other errors are warnings
-			if (err instanceof Error && "code" in err && err.code !== "ENOENT") {
+			if (err instanceof Error && "code" in err && (err as any).code !== "ENOENT") {
 				log.logWarning(`Failed to delete event file: ${filename}`, String(err));
 			}
 		}
@@ -375,9 +367,9 @@ export class EventsWatcher {
 }
 
 /**
- * Create and start an events watcher.
+ * Create an events watcher with a callback.
  */
-export function createEventsWatcher(workspaceDir: string, slack: SlackBot): EventsWatcher {
+export function createEventsWatcher(workspaceDir: string, onEvent: OnEventCallback): EventsWatcher {
 	const eventsDir = join(workspaceDir, "events");
-	return new EventsWatcher(eventsDir, slack);
+	return new EventsWatcher(eventsDir, onEvent);
 }

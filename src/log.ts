@@ -3,7 +3,6 @@ import chalk from "chalk";
 export interface LogContext {
 	channelId: string;
 	userName?: string;
-	channelName?: string; // For display like #dev-team vs C16HET4EQ
 }
 
 function timestamp(): string {
@@ -15,14 +14,8 @@ function timestamp(): string {
 }
 
 function formatContext(ctx: LogContext): string {
-	// DMs: [DM:username]
-	// Channels: [#channel-name:username] or [C16HET4EQ:username] if no name
-	if (ctx.channelId.startsWith("D")) {
-		return `[DM:${ctx.userName || ctx.channelId}]`;
-	}
-	const channel = ctx.channelName || ctx.channelId;
 	const user = ctx.userName || "unknown";
-	return `[${channel.startsWith("#") ? channel : `#${channel}`}:${user}]`;
+	return `[${user}]`;
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -34,10 +27,8 @@ function formatToolArgs(args: Record<string, unknown>): string {
 	const lines: string[] = [];
 
 	for (const [key, value] of Object.entries(args)) {
-		// Skip the label - it's already shown in the tool name
 		if (key === "label") continue;
 
-		// For read tool, format path with offset/limit
 		if (key === "path" && typeof value === "string") {
 			const offset = args.offset as number | undefined;
 			const limit = args.limit as number | undefined;
@@ -49,17 +40,10 @@ function formatToolArgs(args: Record<string, unknown>): string {
 			continue;
 		}
 
-		// Skip offset/limit since we already handled them
 		if (key === "offset" || key === "limit") continue;
 
-		// For other values, format them
 		if (typeof value === "string") {
-			// Multi-line strings get indented
-			if (value.includes("\n")) {
-				lines.push(value);
-			} else {
-				lines.push(value);
-			}
+			lines.push(value);
 		} else {
 			lines.push(JSON.stringify(value));
 		}
@@ -68,17 +52,11 @@ function formatToolArgs(args: Record<string, unknown>): string {
 	return lines.join("\n");
 }
 
-// User messages
-export function logUserMessage(ctx: LogContext, text: string): void {
-	console.log(chalk.green(`${timestamp()} ${formatContext(ctx)} ${text}`));
-}
-
 // Tool execution
 export function logToolStart(ctx: LogContext, toolName: string, label: string, args: Record<string, unknown>): void {
 	const formattedArgs = formatToolArgs(args);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ↳ ${toolName}: ${label}`));
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} -> ${toolName}: ${label}`));
 	if (formattedArgs) {
-		// Indent the args
 		const indented = formattedArgs
 			.split("\n")
 			.map((line) => `           ${line}`)
@@ -89,7 +67,7 @@ export function logToolStart(ctx: LogContext, toolName: string, label: string, a
 
 export function logToolSuccess(ctx: LogContext, toolName: string, durationMs: number, result: string): void {
 	const duration = (durationMs / 1000).toFixed(1);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ✓ ${toolName} (${duration}s)`));
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ok ${toolName} (${duration}s)`));
 
 	const truncated = truncate(result, 1000);
 	if (truncated) {
@@ -103,7 +81,7 @@ export function logToolSuccess(ctx: LogContext, toolName: string, durationMs: nu
 
 export function logToolError(ctx: LogContext, toolName: string, durationMs: number, error: string): void {
 	const duration = (durationMs / 1000).toFixed(1);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ✗ ${toolName} (${duration}s)`));
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ERR ${toolName} (${duration}s)`));
 
 	const truncated = truncate(error, 1000);
 	const indented = truncated
@@ -113,50 +91,17 @@ export function logToolError(ctx: LogContext, toolName: string, durationMs: numb
 	console.log(chalk.dim(indented));
 }
 
-// Response streaming
-export function logResponseStart(ctx: LogContext): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} → Streaming response...`));
+// Email events
+export function logEmailReceived(from: string, subject: string): void {
+	console.log(chalk.green(`${timestamp()} [email] Received from ${from}: ${subject}`));
 }
 
-export function logThinking(ctx: LogContext, thinking: string): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} 💭 Thinking`));
-	const truncated = truncate(thinking, 1000);
-	const indented = truncated
-		.split("\n")
-		.map((line) => `           ${line}`)
-		.join("\n");
-	console.log(chalk.dim(indented));
+export function logEmailProcessing(from: string, subject: string): void {
+	console.log(chalk.blue(`${timestamp()} [email] Processing from ${from}: ${subject}`));
 }
 
-export function logResponse(ctx: LogContext, text: string): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} 💬 Response`));
-	const truncated = truncate(text, 1000);
-	const indented = truncated
-		.split("\n")
-		.map((line) => `           ${line}`)
-		.join("\n");
-	console.log(chalk.dim(indented));
-}
-
-// Attachments
-export function logDownloadStart(ctx: LogContext, filename: string, localPath: string): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ↓ Downloading attachment`));
-	console.log(chalk.dim(`           ${filename} → ${localPath}`));
-}
-
-export function logDownloadSuccess(ctx: LogContext, sizeKB: number): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ✓ Downloaded (${sizeKB.toLocaleString()} KB)`));
-}
-
-export function logDownloadError(ctx: LogContext, filename: string, error: string): void {
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ✗ Download failed`));
-	console.log(chalk.dim(`           ${filename}: ${error}`));
-}
-
-// Control
-export function logStopRequest(ctx: LogContext): void {
-	console.log(chalk.green(`${timestamp()} ${formatContext(ctx)} stop`));
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ⊗ Stop requested - aborting`));
+export function logEmailReply(to: string, subject: string): void {
+	console.log(chalk.green(`${timestamp()} [email] Reply sent to ${to}: ${subject}`));
 }
 
 // System
@@ -165,7 +110,7 @@ export function logInfo(message: string): void {
 }
 
 export function logWarning(message: string, details?: string): void {
-	console.log(chalk.yellow(`${timestamp()} [system] ⚠ ${message}`));
+	console.log(chalk.yellow(`${timestamp()} [system] WARNING ${message}`));
 	if (details) {
 		const indented = details
 			.split("\n")
@@ -173,16 +118,6 @@ export function logWarning(message: string, details?: string): void {
 			.join("\n");
 		console.log(chalk.dim(indented));
 	}
-}
-
-export function logAgentError(ctx: LogContext | "system", error: string): void {
-	const context = ctx === "system" ? "[system]" : formatContext(ctx);
-	console.log(chalk.yellow(`${timestamp()} ${context} ✗ Agent error`));
-	const indented = error
-		.split("\n")
-		.map((line) => `           ${line}`)
-		.join("\n");
-	console.log(chalk.dim(indented));
 }
 
 // Usage summary
@@ -198,74 +133,34 @@ export function logUsageSummary(
 	contextTokens?: number,
 	contextWindow?: number,
 ): string {
-	const formatTokens = (count: number): string => {
-		if (count < 1000) return count.toString();
-		if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-		if (count < 1000000) return `${Math.round(count / 1000)}k`;
-		return `${(count / 1000000).toFixed(1)}M`;
-	};
-
 	const lines: string[] = [];
-	lines.push("*Usage Summary*");
+	lines.push("Usage Summary");
 	lines.push(`Tokens: ${usage.input.toLocaleString()} in, ${usage.output.toLocaleString()} out`);
 	if (usage.cacheRead > 0 || usage.cacheWrite > 0) {
 		lines.push(`Cache: ${usage.cacheRead.toLocaleString()} read, ${usage.cacheWrite.toLocaleString()} write`);
 	}
-	if (contextTokens && contextWindow) {
-		const contextPercent = ((contextTokens / contextWindow) * 100).toFixed(1);
-		lines.push(`Context: ${formatTokens(contextTokens)} / ${formatTokens(contextWindow)} (${contextPercent}%)`);
-	}
-	lines.push(
-		`Cost: $${usage.cost.input.toFixed(4)} in, $${usage.cost.output.toFixed(4)} out` +
-			(usage.cacheRead > 0 || usage.cacheWrite > 0
-				? `, $${usage.cost.cacheRead.toFixed(4)} cache read, $${usage.cost.cacheWrite.toFixed(4)} cache write`
-				: ""),
-	);
-	lines.push(`*Total: $${usage.cost.total.toFixed(4)}*`);
+	lines.push(`Total cost: $${usage.cost.total.toFixed(4)}`);
 
 	const summary = lines.join("\n");
 
-	// Log to console
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} 💰 Usage`));
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} Usage`));
 	console.log(
 		chalk.dim(
-			`           ${usage.input.toLocaleString()} in + ${usage.output.toLocaleString()} out` +
-				(usage.cacheRead > 0 || usage.cacheWrite > 0
-					? ` (${usage.cacheRead.toLocaleString()} cache read, ${usage.cacheWrite.toLocaleString()} cache write)`
-					: "") +
-				` = $${usage.cost.total.toFixed(4)}`,
+			`           ${usage.input.toLocaleString()} in + ${usage.output.toLocaleString()} out = $${usage.cost.total.toFixed(4)}`,
 		),
 	);
 
 	return summary;
 }
 
-// Startup (no context needed)
+// Startup
 export function logStartup(workingDir: string, sandbox: string): void {
-	console.log("Starting mom bot...");
+	console.log("Starting mom email assistant...");
 	console.log(`  Working directory: ${workingDir}`);
 	console.log(`  Sandbox: ${sandbox}`);
 }
 
 export function logConnected(): void {
-	console.log("⚡️ Mom bot connected and listening!");
+	console.log("Email assistant running and listening for webhooks!");
 	console.log("");
-}
-
-export function logDisconnected(): void {
-	console.log("Mom bot disconnected.");
-}
-
-// Backfill
-export function logBackfillStart(channelCount: number): void {
-	console.log(chalk.blue(`${timestamp()} [system] Backfilling ${channelCount} channels...`));
-}
-
-export function logBackfillChannel(channelName: string, messageCount: number): void {
-	console.log(chalk.blue(`${timestamp()} [system]   #${channelName}: ${messageCount} messages`));
-}
-
-export function logBackfillComplete(totalMessages: number, durationMs: number): void {
-	const duration = (durationMs / 1000).toFixed(1);
-	console.log(chalk.blue(`${timestamp()} [system] Backfill complete: ${totalMessages} messages in ${duration}s`));
 }
