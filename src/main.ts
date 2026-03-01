@@ -22,6 +22,7 @@ const MAILGUN_FROM_ADDRESS = process.env.MAILGUN_FROM_ADDRESS;
 const MAILGUN_SIGNING_KEY = process.env.MAILGUN_SIGNING_KEY;
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
 const TRIGGER_PHRASE = process.env.TRIGGER_PHRASE || "@Claude";
+const ALLOWED_USER_EMAIL = process.env.ALLOWED_USER_EMAIL;
 
 interface ParsedArgs {
 	workingDir?: string;
@@ -189,6 +190,13 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 // ============================================================================
 
 async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
+	// Check sender against allowlist
+	const senderAddress = (parsed.sender || parsed.from).replace(/.*<([^>]+)>.*/, "$1").toLowerCase();
+	if (ALLOWED_USER_EMAIL && senderAddress !== ALLOWED_USER_EMAIL.toLowerCase()) {
+		log.logWarning(`Rejected email from unauthorized sender: ${senderAddress}`);
+		return;
+	}
+
 	// Generate stable ID from Message-Id
 	const id = EmailStore.hashMessageId(parsed.messageId);
 
