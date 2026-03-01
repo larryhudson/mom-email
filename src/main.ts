@@ -9,7 +9,7 @@ import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { sendEmail, validateMailgunCredentials, type MailgunConfig } from "./mailgun.js";
 import { ProcessingQueue } from "./queue.js";
-import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+import { parseContainerArg, type DockerConfig, validateSandbox } from "./sandbox.js";
 
 // ============================================================================
 // Config
@@ -24,20 +24,20 @@ const TRIGGER_PHRASE = process.env.TRIGGER_PHRASE || "@Claude";
 
 interface ParsedArgs {
 	workingDir?: string;
-	sandbox: SandboxConfig;
+	docker: DockerConfig;
 }
 
 function parseArgs(): ParsedArgs {
 	const args = process.argv.slice(2);
-	let sandbox: SandboxConfig = { type: "host" };
+	let containerName: string | undefined;
 	let workingDir: string | undefined;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (arg.startsWith("--sandbox=")) {
-			sandbox = parseSandboxArg(arg.slice("--sandbox=".length));
-		} else if (arg === "--sandbox") {
-			sandbox = parseSandboxArg(args[++i] || "");
+		if (arg.startsWith("--container=")) {
+			containerName = arg.slice("--container=".length);
+		} else if (arg === "--container") {
+			containerName = args[++i] || undefined;
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -45,18 +45,18 @@ function parseArgs(): ParsedArgs {
 
 	return {
 		workingDir: workingDir ? resolve(workingDir) : undefined,
-		sandbox,
+		docker: parseContainerArg(containerName),
 	};
 }
 
 const parsedArgs = parseArgs();
 
 if (!parsedArgs.workingDir) {
-	console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
+	console.error("Usage: mom [--container=<name>] <working-directory>");
 	process.exit(1);
 }
 
-const { workingDir, sandbox } = { workingDir: parsedArgs.workingDir, sandbox: parsedArgs.sandbox };
+const { workingDir, docker } = { workingDir: parsedArgs.workingDir, docker: parsedArgs.docker };
 
 if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN || !MAILGUN_FROM_ADDRESS) {
 	console.error("Missing env: MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_FROM_ADDRESS");
@@ -67,7 +67,7 @@ const mailgunApiKey: string = MAILGUN_API_KEY;
 const mailgunDomain: string = MAILGUN_DOMAIN;
 const mailgunFromAddress: string = MAILGUN_FROM_ADDRESS;
 
-await validateSandbox(sandbox);
+await validateSandbox(docker, workingDir);
 
 // ============================================================================
 // Setup
@@ -81,7 +81,7 @@ const mailgunConfig: MailgunConfig = {
 
 const emailStore = new EmailStore(workingDir);
 
-log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
+log.logStartup(workingDir, `docker:${docker.container}`);
 
 // Validate Mailgun credentials before starting
 try {
@@ -113,9 +113,10 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 	const recentEmails = emailStore.getMany(recentIds);
 
 	try {
-		const result = await runAgent(sandbox, workingDir, {
+		const result = await runAgent(docker, workingDir, {
 			triggeredEmail: email,
 			recentEmails,
+			fromAddress: mailgunFromAddress,
 		}, TRIGGER_PHRASE);
 
 		// Check for [SILENT] marker
@@ -123,18 +124,49 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 			log.logInfo(`Silent response for email ${emailId} -- no reply sent`);
 		} else if (result.replyText.trim()) {
 			// Build threading headers
+			const replySubject = email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`;
 			const references = email.references
 				? `${email.references} ${email.messageId}`
 				: email.messageId;
 
-			await sendEmail(mailgunConfig, {
-				to: email.from,
-				subject: email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`,
-				text: result.replyText,
+			let sentMessageId: string;
+
+			if (isDryRun) {
+				// Dev/test mode: log the reply instead of sending via Mailgun
+				log.logInfo(`[DRY RUN] Would send reply to ${email.from}: ${replySubject}`);
+				log.logInfo(`[DRY RUN] Reply body:\n${result.replyText}`);
+				sentMessageId = `<dryrun_${Date.now()}@local>`;
+			} else {
+				const sendResult = await sendEmail(mailgunConfig, {
+					to: email.from,
+					subject: replySubject,
+					text: result.replyText,
+					inReplyTo: email.messageId,
+					references,
+					attachments: result.attachments.length > 0 ? result.attachments : undefined,
+				});
+				sentMessageId = sendResult.id;
+			}
+
+			// Save sent email to store
+			const sentId = EmailStore.hashMessageId(sentMessageId);
+			const sentEmail: StoredEmail = {
+				id: sentId,
+				messageId: sentMessageId,
 				inReplyTo: email.messageId,
 				references,
-				attachments: result.attachments.length > 0 ? result.attachments : undefined,
-			});
+				from: mailgunFromAddress,
+				to: email.from,
+				subject: replySubject,
+				date: new Date().toISOString(),
+				receivedAt: new Date().toISOString(),
+				bodyPlain: result.replyText,
+				strippedText: result.replyText,
+				triggered: false,
+				processed: true,
+				attachments: [],
+			};
+			await emailStore.saveSent(sentEmail);
 
 			log.logEmailReply(email.from, email.subject);
 		} else {
@@ -230,9 +262,14 @@ eventsWatcher.start();
 // Start Server
 // ============================================================================
 
+const isDryRun = process.env.IS_DRY_RUN === "true";
+if (isDryRun) {
+	log.logWarning("Dry run mode enabled -- signature verification skipped, emails will not be sent");
+}
+
 const emailServer = createEmailServer({
 	port: WEBHOOK_PORT,
-	signingKey: MAILGUN_SIGNING_KEY,
+	signingKey: isDryRun ? undefined : MAILGUN_SIGNING_KEY,
 	onEmail: handleIncomingEmail,
 });
 

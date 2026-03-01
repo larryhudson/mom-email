@@ -14,8 +14,10 @@
 	],
 	"scripts": {
 		"clean": "rm -rf dist",
+		"type-check": "tsgo -p tsconfig.build.json --noEmit",
 		"build": "tsgo -p tsconfig.build.json && chmod +x dist/main.js",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"dev": "IS_DRY_RUN=true tsx --watch src/main.ts ./data",
+		"send-email": "tsx scripts/send-email.ts",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
@@ -32,6 +34,8 @@
 	"devDependencies": {
 		"@types/diff": "^7.0.2",
 		"@types/node": "^24.3.0",
+		"@typescript/native-preview": "^7.0.0-dev.20260228.1",
+		"tsx": "^4.21.0",
 		"typescript": "^5.7.3"
 	},
 	"keywords": [

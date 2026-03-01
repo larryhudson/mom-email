@@ -1,28 +1,16 @@
 import { spawn } from "child_process";
 
-export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
+const DEFAULT_CONTAINER = "mom-sandbox";
 
-export function parseSandboxArg(value: string): SandboxConfig {
-	if (value === "host") {
-		return { type: "host" };
-	}
-	if (value.startsWith("docker:")) {
-		const container = value.slice("docker:".length);
-		if (!container) {
-			console.error("Error: docker sandbox requires container name (e.g., docker:mom-sandbox)");
-			process.exit(1);
-		}
-		return { type: "docker", container };
-	}
-	console.error(`Error: Invalid sandbox type '${value}'. Use 'host' or 'docker:<container-name>'`);
-	process.exit(1);
+export interface DockerConfig {
+	container: string;
 }
 
-export async function validateSandbox(config: SandboxConfig): Promise<void> {
-	if (config.type === "host") {
-		return;
-	}
+export function parseContainerArg(value: string | undefined): DockerConfig {
+	return { container: value || DEFAULT_CONTAINER };
+}
 
+export async function validateSandbox(config: DockerConfig, workingDir: string): Promise<void> {
 	// Check if Docker is available
 	try {
 		await execSimple("docker", ["--version"]);
@@ -31,18 +19,44 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 		process.exit(1);
 	}
 
-	// Check if container exists and is running
+	// Check if container exists
+	let exists = false;
+	let running = false;
 	try {
 		const result = await execSimple("docker", ["inspect", "-f", "{{.State.Running}}", config.container]);
-		if (result.trim() !== "true") {
-			console.error(`Error: Container '${config.container}' is not running.`);
-			console.error(`Start it with: docker start ${config.container}`);
+		exists = true;
+		running = result.trim() === "true";
+	} catch {
+		// Container doesn't exist
+	}
+
+	if (!exists) {
+		console.log(`  Container '${config.container}' not found, creating...`);
+		try {
+			await execSimple("docker", [
+				"run", "-d",
+				"--name", config.container,
+				"-v", `${workingDir}:/workspace`,
+				"alpine:latest",
+				"tail", "-f", "/dev/null",
+			]);
+			console.log(`  Container '${config.container}' created.`);
+			running = true;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error(`Error: Failed to create container '${config.container}': ${msg}`);
 			process.exit(1);
 		}
-	} catch {
-		console.error(`Error: Container '${config.container}' does not exist.`);
-		console.error("Create it with: ./docker.sh create <data-dir>");
-		process.exit(1);
+	} else if (!running) {
+		console.log(`  Container '${config.container}' exists but stopped, starting...`);
+		try {
+			await execSimple("docker", ["start", config.container]);
+			running = true;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error(`Error: Failed to start container '${config.container}': ${msg}`);
+			process.exit(1);
+		}
 	}
 
 	console.log(`  Docker container '${config.container}' is running.`);
@@ -67,12 +81,9 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Create an executor that runs commands either on host or in Docker container
+ * Create an executor that runs commands in a Docker container
  */
-export function createExecutor(config: SandboxConfig): Executor {
-	if (config.type === "host") {
-		return new HostExecutor();
-	}
+export function createExecutor(config: DockerConfig): Executor {
 	return new DockerExecutor(config.container);
 }
 
@@ -83,9 +94,7 @@ export interface Executor {
 	exec(command: string, options?: ExecOptions): Promise<ExecResult>;
 
 	/**
-	 * Get the workspace path prefix for this executor
-	 * Host: returns the actual path
-	 * Docker: returns /workspace
+	 * Get the workspace path inside the container (/workspace)
 	 */
 	getWorkspacePath(hostPath: string): string;
 }

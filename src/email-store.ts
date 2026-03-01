@@ -32,10 +32,12 @@ export interface StoredEmail {
 export interface EmailIndexEntry {
 	id: string;
 	from: string;
+	to?: string;
 	subject: string;
 	date: string;
 	triggered: boolean;
 	processed: boolean;
+	folder: "inbox" | "sent";
 }
 
 export interface GetRecentOptions {
@@ -51,17 +53,20 @@ export interface GetRecentOptions {
 export class EmailStore {
 	private emailsDir: string;
 	private inboxDir: string;
+	private sentDir: string;
 	private attachmentsDir: string;
 	private indexPath: string;
 
 	constructor(private workingDir: string) {
 		this.emailsDir = join(workingDir, "emails");
 		this.inboxDir = join(this.emailsDir, "inbox");
+		this.sentDir = join(this.emailsDir, "sent");
 		this.attachmentsDir = join(this.emailsDir, "attachments");
 		this.indexPath = join(this.emailsDir, "index.jsonl");
 
 		// Ensure directories exist
 		mkdirSync(this.inboxDir, { recursive: true });
+		mkdirSync(this.sentDir, { recursive: true });
 		mkdirSync(this.attachmentsDir, { recursive: true });
 	}
 
@@ -83,10 +88,33 @@ export class EmailStore {
 		const indexEntry: EmailIndexEntry = {
 			id: email.id,
 			from: email.from,
+			to: email.to,
 			subject: email.subject,
 			date: email.date,
 			triggered: email.triggered,
 			processed: email.processed ?? false,
+			folder: "inbox",
+		};
+		await appendFile(this.indexPath, JSON.stringify(indexEntry) + "\n", "utf-8");
+	}
+
+	/**
+	 * Save a sent email to disk and append to the index.
+	 */
+	async saveSent(email: StoredEmail): Promise<void> {
+		const filePath = join(this.sentDir, `${email.id}.json`);
+		await writeFile(filePath, JSON.stringify(email, null, 2), "utf-8");
+
+		// Append to index
+		const indexEntry: EmailIndexEntry = {
+			id: email.id,
+			from: email.from,
+			to: email.to,
+			subject: email.subject,
+			date: email.date,
+			triggered: email.triggered,
+			processed: email.processed ?? false,
+			folder: "sent",
 		};
 		await appendFile(this.indexPath, JSON.stringify(indexEntry) + "\n", "utf-8");
 	}
@@ -106,13 +134,17 @@ export class EmailStore {
 	 * Load a single email by ID.
 	 */
 	get(emailId: string): StoredEmail | null {
-		const filePath = join(this.inboxDir, `${emailId}.json`);
-		if (!existsSync(filePath)) return null;
-		try {
-			return JSON.parse(readFileSync(filePath, "utf-8")) as StoredEmail;
-		} catch {
-			return null;
+		// Check inbox first, then sent
+		for (const dir of [this.inboxDir, this.sentDir]) {
+			const filePath = join(dir, `${emailId}.json`);
+			if (!existsSync(filePath)) continue;
+			try {
+				return JSON.parse(readFileSync(filePath, "utf-8")) as StoredEmail;
+			} catch {
+				continue;
+			}
 		}
+		return null;
 	}
 
 	/**
@@ -140,7 +172,10 @@ export class EmailStore {
 		let entries: EmailIndexEntry[] = [];
 		for (const line of lines) {
 			try {
-				entries.push(JSON.parse(line) as EmailIndexEntry);
+				const entry = JSON.parse(line) as EmailIndexEntry;
+				// Backward compat: default missing folder to "inbox"
+				if (!entry.folder) entry.folder = "inbox";
+				entries.push(entry);
 			} catch {
 				// Skip malformed lines
 			}
