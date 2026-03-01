@@ -121,8 +121,33 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 			fromAddress: mailgunFromAddress,
 		}, TRIGGER_PHRASE);
 
+		// If the agent errored (e.g. API rejected the request), send the error as a reply
+		if (result.stopReason === "error") {
+			const errorText = result.errorMessage || "An unknown error occurred while processing your email.";
+			log.logWarning(`Agent error for email ${emailId}: ${errorText}`);
+
+			const replySubject = email.subject.startsWith("Re:") ? email.subject : `Re: ${email.subject}`;
+			const references = email.references
+				? `${email.references} ${email.messageId}`
+				: email.messageId;
+			const errorReplyText = `Sorry, I ran into an error while processing your email:\n\n${errorText}`;
+
+			if (isDryRun) {
+				log.logInfo(`[DRY RUN] Would send error reply to ${email.from}: ${replySubject}`);
+				log.logInfo(`[DRY RUN] Error body:\n${errorReplyText}`);
+			} else {
+				const replyHtml = await marked(errorReplyText);
+				await sendEmail(mailgunConfig, {
+					to: email.from,
+					subject: replySubject,
+					text: errorReplyText,
+					html: replyHtml,
+					inReplyTo: email.messageId,
+					references,
+				});
+			}
 		// Check for [SILENT] marker
-		if (result.replyText.trim() === "[SILENT]" || result.replyText.trim().startsWith("[SILENT]")) {
+		} else if (result.replyText.trim() === "[SILENT]" || result.replyText.trim().startsWith("[SILENT]")) {
 			log.logInfo(`Silent response for email ${emailId} -- no reply sent`);
 		} else if (result.replyText.trim()) {
 			// Build threading headers
