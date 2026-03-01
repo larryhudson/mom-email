@@ -274,6 +274,7 @@ const emailServer = createEmailServer({
 	port: WEBHOOK_PORT,
 	signingKey: isDryRun ? undefined : MAILGUN_SIGNING_KEY,
 	onEmail: handleIncomingEmail,
+	workingDir,
 });
 
 emailServer.start();

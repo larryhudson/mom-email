@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { verifyWebhookSignature } from "./mailgun.js";
+import { handleWorkspaceRequest } from "./workspace-browser.js";
 import * as log from "./log.js";
 
 // ============================================================================
@@ -26,6 +27,7 @@ export interface EmailServerConfig {
 	port: number;
 	signingKey?: string;  // If set, verify Mailgun webhook signatures
 	onEmail: (email: ParsedEmail) => Promise<void>;
+	workingDir: string;   // Workspace root for the file browser
 }
 
 // ============================================================================
@@ -37,6 +39,11 @@ export interface EmailServerConfig {
  */
 export function createEmailServer(config: EmailServerConfig): { start: () => void; stop: () => void } {
 	const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+		// Workspace file browser
+		if (req.url?.startsWith("/workspace") && req.method === "GET") {
+			if (handleWorkspaceRequest(config.workingDir, req, res)) return;
+		}
+
 		// Only accept POST to /webhook/mailgun
 		if (req.method !== "POST" || req.url !== "/webhook/mailgun") {
 			res.writeHead(404, { "Content-Type": "text/plain" });
