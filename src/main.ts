@@ -10,7 +10,7 @@ import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { sendEmail, validateMailgunCredentials, type MailgunConfig } from "./mailgun.js";
 import { ProcessingQueue } from "./queue.js";
-import { parseContainerArg, type DockerConfig, validateSandbox } from "./sandbox.js";
+import { parseContainerArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 
 // ============================================================================
 // Config
@@ -23,10 +23,11 @@ const MAILGUN_SIGNING_KEY = process.env.MAILGUN_SIGNING_KEY;
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
 const TRIGGER_PHRASE = process.env.TRIGGER_PHRASE || "@Claude";
 const ALLOWED_USER_EMAIL = process.env.ALLOWED_USER_EMAIL;
+const DANGEROUSLY_RUN_COMMANDS_ON_HOST = process.env.DANGEROUSLY_RUN_COMMANDS_ON_HOST === "true";
 
 interface ParsedArgs {
 	workingDir?: string;
-	docker: DockerConfig;
+	containerName?: string;
 }
 
 function parseArgs(): ParsedArgs {
@@ -47,7 +48,7 @@ function parseArgs(): ParsedArgs {
 
 	return {
 		workingDir: workingDir ? resolve(workingDir) : undefined,
-		docker: parseContainerArg(containerName),
+		containerName,
 	};
 }
 
@@ -58,7 +59,18 @@ if (!parsedArgs.workingDir) {
 	process.exit(1);
 }
 
-const { workingDir, docker } = { workingDir: parsedArgs.workingDir, docker: parsedArgs.docker };
+const workingDir = parsedArgs.workingDir;
+
+// Determine sandbox config
+let sandbox: SandboxConfig;
+if (DANGEROUSLY_RUN_COMMANDS_ON_HOST) {
+	console.warn("WARNING: DANGEROUSLY_RUN_COMMANDS_ON_HOST is enabled. Commands will run directly on the host machine.");
+	sandbox = { type: "host" };
+} else {
+	const docker = parseContainerArg(parsedArgs.containerName);
+	await validateSandbox(docker, workingDir);
+	sandbox = { type: "docker", container: docker.container };
+}
 
 if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN || !MAILGUN_FROM_ADDRESS) {
 	console.error("Missing env: MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_FROM_ADDRESS");
@@ -68,8 +80,6 @@ if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN || !MAILGUN_FROM_ADDRESS) {
 const mailgunApiKey: string = MAILGUN_API_KEY;
 const mailgunDomain: string = MAILGUN_DOMAIN;
 const mailgunFromAddress: string = MAILGUN_FROM_ADDRESS;
-
-await validateSandbox(docker, workingDir);
 
 // ============================================================================
 // Setup
@@ -83,7 +93,8 @@ const mailgunConfig: MailgunConfig = {
 
 const emailStore = new EmailStore(workingDir);
 
-log.logStartup(workingDir, `docker:${docker.container}`);
+const sandboxLabel = sandbox.type === "host" ? "host (DANGEROUS)" : `docker:${sandbox.container}`;
+log.logStartup(workingDir, sandboxLabel);
 
 // Validate Mailgun credentials before starting
 try {
@@ -115,7 +126,7 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 	const recentEmails = emailStore.getMany(recentIds);
 
 	try {
-		const result = await runAgent(docker, workingDir, {
+		const result = await runAgent(sandbox, workingDir, {
 			triggeredEmail: email,
 			recentEmails,
 			fromAddress: mailgunFromAddress,

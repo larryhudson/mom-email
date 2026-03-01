@@ -6,6 +6,10 @@ export interface DockerConfig {
 	container: string;
 }
 
+export type SandboxConfig =
+	| { type: "host" }
+	| { type: "docker"; container: string };
+
 export function parseContainerArg(value: string | undefined): DockerConfig {
 	return { container: value || DEFAULT_CONTAINER };
 }
@@ -81,9 +85,13 @@ function execSimple(cmd: string, args: string[]): Promise<string> {
 }
 
 /**
- * Create an executor that runs commands in a Docker container
+ * Create an executor based on sandbox config.
+ * Returns a HostExecutor for host mode, DockerExecutor for docker mode.
  */
-export function createExecutor(config: DockerConfig): Executor {
+export function createExecutor(config: SandboxConfig): Executor {
+	if (config.type === "host") {
+		return new HostExecutor();
+	}
 	return new DockerExecutor(config.container);
 }
 

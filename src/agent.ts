@@ -19,7 +19,7 @@ import { homedir } from "os";
 import { join } from "path";
 import type { StoredEmail } from "./email-store.js";
 import * as log from "./log.js";
-import { createExecutor, type DockerConfig } from "./sandbox.js";
+import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
 
 // Hardcoded model for now
@@ -90,8 +90,14 @@ function buildSystemPrompt(
 	triggerPhrase: string,
 	fromAddress: string,
 	triggered: boolean,
+	sandboxType: "host" | "docker",
 ): string {
-	const envDescription = `You are running inside a Docker container (Alpine Linux).
+	const envDescription = sandboxType === "host"
+		? `You are running commands directly on the host machine.
+- Bash working directory: ${workspacePath}
+- You have full access to the host system
+- Your changes persist across sessions`
+		: `You are running inside a Docker container (Alpine Linux).
 - Bash working directory: / (use cd or absolute paths)
 - Install tools with: apk add <package>
 - Your changes persist across sessions`;
@@ -309,12 +315,12 @@ function formatEmailForPrompt(email: StoredEmail, direction: "received" | "sent"
  * Creates a fresh session, processes the email, and returns the reply.
  */
 export async function runAgent(
-	dockerConfig: DockerConfig,
+	sandboxConfig: SandboxConfig,
 	workingDir: string,
 	context: AgentContext,
 	triggerPhrase: string,
 ): Promise<AgentRunResult> {
-	const executor = createExecutor(dockerConfig);
+	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(workingDir);
 
 	// Create tools
@@ -332,7 +338,7 @@ export async function runAgent(
 	const memory = getMemory(workingDir);
 	const skills = loadSkills(workingDir, workspacePath);
 	const triggered = context.triggeredEmail.triggered;
-	const systemPrompt = buildSystemPrompt(workspacePath, memory, skills, triggerPhrase, context.fromAddress, triggered);
+	const systemPrompt = buildSystemPrompt(workspacePath, memory, skills, triggerPhrase, context.fromAddress, triggered, sandboxConfig.type);
 
 	// Create session infrastructure
 	const sessionsDir = join(workingDir, "sessions");
