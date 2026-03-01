@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { Busboy, type BusboyFileStream, type BusboyHeaders } from "@fastify/busboy";
 import { verifyWebhookSignature } from "./mailgun.js";
 import { handleWorkspaceRequest } from "./workspace-browser.js";
 import * as log from "./log.js";
@@ -6,6 +7,12 @@ import * as log from "./log.js";
 // ============================================================================
 // Types
 // ============================================================================
+
+export interface ParsedAttachment {
+	filename: string;
+	contentType: string;
+	data: Buffer;
+}
 
 export interface ParsedEmail {
 	sender: string;
@@ -19,7 +26,7 @@ export interface ParsedEmail {
 	references?: string;
 	date: string;
 	attachmentCount: number;
-	// Raw fields for attachment handling
+	attachments: ParsedAttachment[];
 	rawFields: Map<string, string>;
 }
 
@@ -51,9 +58,25 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 			return;
 		}
 
+		const contentType = req.headers["content-type"] || "unknown";
+		log.logInfo(`Webhook received: content-type=${contentType.split(";")[0]}, content-length=${req.headers["content-length"] || "unknown"}`);
+
 		try {
-			const body = await readBody(req);
-			const fields = parseFormUrlEncoded(body);
+			let fields: Map<string, string>;
+			let attachments: ParsedAttachment[];
+
+			if (contentType.startsWith("multipart/form-data")) {
+				const result = await parseMultipartFormData(req);
+				fields = result.fields;
+				attachments = result.attachments;
+				if (attachments.length > 0) {
+					log.logInfo(`Parsed ${attachments.length} attachment(s): ${attachments.map((a) => `${a.filename} (${a.contentType}, ${(a.data.length / 1024).toFixed(0)}KB)`).join(", ")}`);
+				}
+			} else {
+				const body = await readBody(req);
+				fields = parseFormUrlEncoded(body);
+				attachments = [];
+			}
 
 			// Optional signature verification
 			if (config.signingKey) {
@@ -77,7 +100,7 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 				}
 			}
 
-			const email = fieldsToEmail(fields);
+			const email = fieldsToEmail(fields, attachments);
 
 			log.logEmailReceived(email.from, email.subject);
 
@@ -92,7 +115,7 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 			});
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
-			log.logWarning("Webhook error", msg);
+			log.logWarning("Webhook error", `${msg}\nContent-Type: ${contentType}`);
 			res.writeHead(400, { "Content-Type": "text/plain" });
 			res.end("Bad Request");
 		}
@@ -138,6 +161,51 @@ function readBody(req: IncomingMessage): Promise<string> {
 	});
 }
 
+function parseMultipartFormData(req: IncomingMessage): Promise<{ fields: Map<string, string>; attachments: ParsedAttachment[] }> {
+	return new Promise((resolve, reject) => {
+		const fields = new Map<string, string>();
+		const attachments: ParsedAttachment[] = [];
+
+		const busboy = Busboy({
+			headers: req.headers as BusboyHeaders,
+			limits: {
+				fileSize: 10 * 1024 * 1024, // 10MB per file
+				files: 10,
+			},
+		});
+
+		busboy.on("field", (fieldname: string, value: string) => {
+			fields.set(fieldname, value);
+		});
+
+		busboy.on("file", (fieldname: string, stream: BusboyFileStream, filename: string, _encoding: string, mimeType: string) => {
+			const chunks: Buffer[] = [];
+			stream.on("data", (chunk: Buffer) => {
+				chunks.push(chunk);
+			});
+			stream.on("end", () => {
+				if (filename) {
+					attachments.push({
+						filename,
+						contentType: mimeType,
+						data: Buffer.concat(chunks),
+					});
+				}
+			});
+		});
+
+		busboy.on("finish", () => {
+			resolve({ fields, attachments });
+		});
+
+		busboy.on("error", (err: unknown) => {
+			reject(err instanceof Error ? err : new Error(String(err)));
+		});
+
+		req.pipe(busboy);
+	});
+}
+
 function parseFormUrlEncoded(body: string): Map<string, string> {
 	const fields = new Map<string, string>();
 	const pairs = body.split("&");
@@ -151,7 +219,7 @@ function parseFormUrlEncoded(body: string): Map<string, string> {
 	return fields;
 }
 
-function fieldsToEmail(fields: Map<string, string>): ParsedEmail {
+function fieldsToEmail(fields: Map<string, string>, attachments: ParsedAttachment[]): ParsedEmail {
 	return {
 		sender: fields.get("sender") || "",
 		from: fields.get("from") || fields.get("sender") || "",
@@ -163,7 +231,8 @@ function fieldsToEmail(fields: Map<string, string>): ParsedEmail {
 		inReplyTo: fields.get("In-Reply-To") || undefined,
 		references: fields.get("References") || undefined,
 		date: fields.get("Date") || new Date().toISOString(),
-		attachmentCount: parseInt(fields.get("attachment-count") || "0", 10),
+		attachmentCount: parseInt(fields.get("attachment-count") || "0", 10) || attachments.length,
+		attachments,
 		rawFields: fields,
 	};
 }

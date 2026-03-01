@@ -196,6 +196,17 @@ async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
 	const triggerRegex = new RegExp(TRIGGER_PHRASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 	const triggered = triggerRegex.test(parsed.strippedText);
 
+	// Save attachments to disk
+	const savedAttachments: StoredEmail["attachments"] = [];
+	for (const attachment of parsed.attachments) {
+		const localPath = await emailStore.saveAttachment(id, attachment.filename, attachment.data);
+		savedAttachments.push({
+			filename: attachment.filename,
+			contentType: attachment.contentType,
+			localPath,
+		});
+	}
+
 	// Build stored email
 	const storedEmail: StoredEmail = {
 		id,
@@ -212,7 +223,7 @@ async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
 		bodyHtml: parsed.bodyHtml,
 		triggered,
 		processed: false,
-		attachments: [],
+		attachments: savedAttachments,
 	};
 
 	// Save to store
