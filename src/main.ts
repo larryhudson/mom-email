@@ -255,7 +255,7 @@ const eventsWatcher = createEventsWatcher(workingDir, (text: string, _filename: 
 	const syntheticEmail: StoredEmail = {
 		id: eventId,
 		messageId: `<${eventId}@events>`,
-		from: "system@events",
+		from: ALLOWED_USER_EMAIL || "system@events",
 		to: mailgunFromAddress,
 		subject: "Scheduled Event",
 		date: new Date().toISOString(),
