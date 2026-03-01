@@ -1,0 +1,18 @@
+[Unit]
+Description=mom-email webhook server
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=dev
+WorkingDirectory=/home/dev/apps/mom-email
+ExecStartPre=/usr/bin/docker start mom-sandbox
+ExecStart=/usr/bin/node dist/main.js --container=mom-sandbox ./data
+Restart=always
+RestartSec=3
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/dev/apps/mom-email/.env
+
+[Install]
+WantedBy=multi-user.target
