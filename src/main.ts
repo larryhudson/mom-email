@@ -2,6 +2,7 @@
 
 import "dotenv/config";
 import { resolve } from "path";
+import { marked } from "marked";
 import { runAgent } from "./agent.js";
 import { createEmailServer, type ParsedEmail } from "./email-server.js";
 import { EmailStore, type StoredEmail } from "./email-store.js";
@@ -137,10 +138,12 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 				log.logInfo(`[DRY RUN] Reply body:\n${result.replyText}`);
 				sentMessageId = `<dryrun_${Date.now()}@local>`;
 			} else {
+				const replyHtml = await marked(result.replyText);
 				const sendResult = await sendEmail(mailgunConfig, {
 					to: email.from,
 					subject: replySubject,
 					text: result.replyText,
+					html: replyHtml,
 					inReplyTo: email.messageId,
 					references,
 					attachments: result.attachments.length > 0 ? result.attachments : undefined,
