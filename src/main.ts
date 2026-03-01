@@ -121,8 +121,11 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 			fromAddress: mailgunFromAddress,
 		}, TRIGGER_PHRASE);
 
-		// If the agent errored (e.g. API rejected the request), send the error as a reply
-		if (result.stopReason === "error") {
+		if (!email.triggered) {
+			// Background mode: agent processed the email but no reply is sent
+			log.logInfo(`Background processing complete for email ${emailId} -- no reply sent (not triggered)`);
+		} else if (result.stopReason === "error") {
+			// If the agent errored (e.g. API rejected the request), send the error as a reply
 			const errorText = result.errorMessage || "An unknown error occurred while processing your email.";
 			log.logWarning(`Agent error for email ${emailId}: ${errorText}`);
 
@@ -146,8 +149,8 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 					references,
 				});
 			}
-		// Check for [SILENT] marker
 		} else if (result.replyText.trim() === "[SILENT]" || result.replyText.trim().startsWith("[SILENT]")) {
+			// Explicit silent marker (e.g. periodic events with nothing to report)
 			log.logInfo(`Silent response for email ${emailId} -- no reply sent`);
 		} else if (result.replyText.trim()) {
 			// Build threading headers
@@ -264,10 +267,10 @@ async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
 
 	if (triggered) {
 		log.logInfo(`Trigger phrase "${TRIGGER_PHRASE}" detected in email from ${parsed.from}`);
-		queue.enqueue(id);
 	} else {
-		log.logInfo(`Email stored (no trigger): ${parsed.from} - ${parsed.subject}`);
+		log.logInfo(`Email received (no trigger, background processing): ${parsed.from} - ${parsed.subject}`);
 	}
+	queue.enqueue(id);
 }
 
 // ============================================================================

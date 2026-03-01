@@ -89,19 +89,28 @@ function buildSystemPrompt(
 	skills: Skill[],
 	triggerPhrase: string,
 	fromAddress: string,
+	triggered: boolean,
 ): string {
 	const envDescription = `You are running inside a Docker container (Alpine Linux).
 - Bash working directory: / (use cd or absolute paths)
 - Install tools with: apk add <package>
 - Your changes persist across sessions`;
 
+	const modeSection = triggered
+		? `## How You Work
+- You receive emails that contain "${triggerPhrase}" in the body.
+- You process the email, use tools as needed, and compose a plain text reply.
+- Your final text response becomes the email reply sent back to the sender -- you can ONLY reply to the person who emailed you.`
+		: `## How You Work
+- You are running in BACKGROUND MODE. This email did NOT contain the trigger phrase "${triggerPhrase}", so you will NOT send a reply.
+- You still process the email fully: read the content, update MEMORY.md with relevant information, save documents, and maintain your knowledge.
+- When you are done processing, respond with exactly \`[SILENT]\` and nothing else. Do NOT compose a reply.
+- Think of this as quietly reading and filing information for future reference.`;
+
 	return `You are an email assistant powered by Claude. Be concise. No emojis.
 Your email address is ${fromAddress}. Sign off replies as "Claude", not as the person you're replying to.
 
-## How You Work
-- You receive emails that contain "${triggerPhrase}" in the body.
-- You process the email, use tools as needed, and compose a plain text reply.
-- Your final text response becomes the email reply sent back to the sender -- you can ONLY reply to the person who emailed you.
+${modeSection}
 - Each invocation is a fresh session -- you have no memory of previous sessions except through MEMORY.md, documents/, and the email archive.
 - At the start of each session, check \`ls ${workspacePath}/documents/\` for relevant project documents that may provide context.
 
@@ -322,7 +331,8 @@ export async function runAgent(
 	// Load memory and skills
 	const memory = getMemory(workingDir);
 	const skills = loadSkills(workingDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(workspacePath, memory, skills, triggerPhrase, context.fromAddress);
+	const triggered = context.triggeredEmail.triggered;
+	const systemPrompt = buildSystemPrompt(workspacePath, memory, skills, triggerPhrase, context.fromAddress, triggered);
 
 	// Create session infrastructure
 	const sessionsDir = join(workingDir, "sessions");
@@ -452,11 +462,13 @@ export async function runAgent(
 		userMessage += "</recent_emails>\n\n";
 	}
 
-	// Add the triggered email
-	userMessage += "<triggered_email>\n";
+	// Add the email being processed
+	userMessage += triggered ? "<triggered_email>\n" : "<background_email>\n";
 	userMessage += formatEmailForPrompt(context.triggeredEmail, "received");
-	userMessage += "\n</triggered_email>\n\n";
-	userMessage += "Process this email and compose your reply. Your final text response will be sent as the email reply.";
+	userMessage += triggered ? "\n</triggered_email>\n\n" : "\n</background_email>\n\n";
+	userMessage += triggered
+		? "Process this email and compose your reply. Your final text response will be sent as the email reply."
+		: "Process this email in background mode. Read the content, update MEMORY.md and documents/ as needed to keep your knowledge current. Do NOT compose a reply -- respond with just [SILENT] when done.";
 
 	// Debug: save prompt
 	const debugContext = {
