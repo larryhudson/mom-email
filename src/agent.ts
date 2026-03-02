@@ -23,7 +23,7 @@ import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
 
 // Hardcoded model for now
-const model = getModel("anthropic", "claude-sonnet-4-5");
+const model = getModel("anthropic", "claude-sonnet-4-6");
 
 export interface AgentRunResult {
 	replyText: string;
