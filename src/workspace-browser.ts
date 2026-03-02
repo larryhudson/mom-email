@@ -80,7 +80,7 @@ export function handleWorkspaceRequest(
 			const cleanPath = url.pathname + (url.search || "");
 			res.writeHead(302, {
 				Location: cleanPath,
-				"Set-Cookie": `workspace_token=${workspaceToken}; HttpOnly; SameSite=Strict; Path=/workspace; Max-Age=31536000`,
+				"Set-Cookie": `workspace_token=${workspaceToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`,
 			});
 			res.end();
 			return true;

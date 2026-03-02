@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { Busboy, type BusboyFileStream, type BusboyHeaders } from "@fastify/busboy";
 import { verifyWebhookSignature } from "./mailgun.js";
+import { handleLogRequest } from "./log-viewer.js";
 import { handleWorkspaceRequest } from "./workspace-browser.js";
 import * as log from "./log.js";
 
@@ -50,6 +51,11 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 		// Workspace file browser
 		if (req.url?.startsWith("/workspace") && req.method === "GET") {
 			if (handleWorkspaceRequest(config.workingDir, req, res, config.workspaceToken)) return;
+		}
+
+		// Log viewer
+		if (req.url?.startsWith("/logs") && req.method === "GET") {
+			if (handleLogRequest(req, res, config.workspaceToken)) return;
 		}
 
 		// Only accept POST to /webhook/mailgun
