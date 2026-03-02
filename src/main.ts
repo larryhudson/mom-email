@@ -23,6 +23,7 @@ const MAILGUN_SIGNING_KEY = process.env.MAILGUN_SIGNING_KEY;
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3000", 10);
 const TRIGGER_PHRASE = process.env.TRIGGER_PHRASE || "@Claude";
 const ALLOWED_USER_EMAIL = process.env.ALLOWED_USER_EMAIL;
+const WORKSPACE_TOKEN = process.env.WORKSPACE_TOKEN;
 const DANGEROUSLY_RUN_COMMANDS_ON_HOST = process.env.DANGEROUSLY_RUN_COMMANDS_ON_HOST === "true";
 
 interface ParsedArgs {
@@ -333,6 +334,7 @@ const emailServer = createEmailServer({
 	signingKey: isDryRun ? undefined : MAILGUN_SIGNING_KEY,
 	onEmail: handleIncomingEmail,
 	workingDir,
+	workspaceToken: WORKSPACE_TOKEN,
 });
 
 emailServer.start();

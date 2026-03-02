@@ -17,6 +17,15 @@ interface TreeEntry {
 // File tree
 // ============================================================================
 
+function parseCookies(header: string): Record<string, string> {
+	const cookies: Record<string, string> = {};
+	for (const pair of header.split(";")) {
+		const [key, ...rest] = pair.split("=");
+		if (key) cookies[key.trim()] = rest.join("=").trim();
+	}
+	return cookies;
+}
+
 const IGNORED = new Set(["node_modules", ".git", "__pycache__", ".DS_Store"]);
 
 async function buildTree(root: string, dir: string): Promise<TreeEntry[]> {
@@ -55,8 +64,34 @@ export function handleWorkspaceRequest(
 	workingDir: string,
 	req: IncomingMessage,
 	res: ServerResponse,
+	workspaceToken?: string,
 ): boolean {
 	const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+	// Auth check: if a token is configured, require it
+	if (workspaceToken) {
+		const queryToken = url.searchParams.get("token");
+		const cookies = parseCookies(req.headers.cookie || "");
+		const cookieToken = cookies["workspace_token"];
+
+		if (queryToken === workspaceToken) {
+			// Valid token in URL — set cookie and redirect to clean URL
+			url.searchParams.delete("token");
+			const cleanPath = url.pathname + (url.search || "");
+			res.writeHead(302, {
+				Location: cleanPath,
+				"Set-Cookie": `workspace_token=${workspaceToken}; HttpOnly; SameSite=Strict; Path=/workspace; Max-Age=31536000`,
+			});
+			res.end();
+			return true;
+		}
+
+		if (cookieToken !== workspaceToken) {
+			res.writeHead(401, { "Content-Type": "text/plain" });
+			res.end("Unauthorized — append ?token=YOUR_TOKEN to access the workspace");
+			return true;
+		}
+	}
 
 	if (url.pathname === "/workspace/api/tree" && req.method === "GET") {
 		serveTree(workingDir, res);

@@ -35,6 +35,7 @@ export interface EmailServerConfig {
 	signingKey?: string;  // If set, verify Mailgun webhook signatures
 	onEmail: (email: ParsedEmail) => Promise<void>;
 	workingDir: string;   // Workspace root for the file browser
+	workspaceToken?: string; // If set, require token to access /workspace
 }
 
 // ============================================================================
@@ -48,7 +49,7 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 	const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
 		// Workspace file browser
 		if (req.url?.startsWith("/workspace") && req.method === "GET") {
-			if (handleWorkspaceRequest(config.workingDir, req, res)) return;
+			if (handleWorkspaceRequest(config.workingDir, req, res, config.workspaceToken)) return;
 		}
 
 		// Only accept POST to /webhook/mailgun
