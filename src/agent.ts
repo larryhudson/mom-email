@@ -407,7 +407,7 @@ export async function runAgent(
 		},
 	};
 
-	const logCtx = { channelId: "email", userName: context.triggeredEmail.from };
+	const logCtx = { channelId: "email", userName: context.triggeredEmail.from, emailId: context.triggeredEmail.id };
 
 	// Subscribe to events for logging
 	session.subscribe(async (event) => {

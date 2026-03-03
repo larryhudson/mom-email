@@ -1,9 +1,89 @@
 import chalk from "chalk";
+import { EventEmitter } from "events";
 
 export interface LogContext {
 	channelId: string;
 	userName?: string;
+	emailId?: string;
 }
+
+export interface LogEntry {
+	timestamp: string;
+	level: "info" | "warning" | "email" | "tool" | "usage";
+	message: string;
+	emailId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Event emitter for log streaming
+// ---------------------------------------------------------------------------
+
+const emitter = new EventEmitter();
+const emailBuffers = new Map<string, LogEntry[]>();
+let currentEmailId: string | undefined;
+
+function emit(level: LogEntry["level"], message: string, emailId?: string): void {
+	const id = emailId || currentEmailId;
+	if (!id) return;
+
+	const entry: LogEntry = {
+		timestamp: new Date().toISOString(),
+		level,
+		message,
+		emailId: id,
+	};
+
+	let buffer = emailBuffers.get(id);
+	if (!buffer) {
+		buffer = [];
+		emailBuffers.set(id, buffer);
+	}
+	buffer.push(entry);
+
+	emitter.emit("log", entry);
+}
+
+/** Set the email ID that contextless log calls will be tagged with. */
+export function setCurrentEmail(emailId: string): void {
+	currentEmailId = emailId;
+}
+
+/** Clear the current email context. */
+export function clearCurrentEmail(): void {
+	currentEmailId = undefined;
+}
+
+/** Signal that processing for an email is complete. */
+export function emitComplete(emailId: string): void {
+	emitter.emit("complete", emailId);
+}
+
+/** Get all buffered log entries for an email. */
+export function getBufferedLogs(emailId: string): LogEntry[] {
+	return emailBuffers.get(emailId) || [];
+}
+
+/** Subscribe to log events. Returns an unsubscribe function. */
+export function subscribe(
+	onLog: (entry: LogEntry) => void,
+	onComplete: (emailId: string) => void,
+): () => void {
+	emitter.on("log", onLog);
+	emitter.on("complete", onComplete);
+	return () => {
+		emitter.off("log", onLog);
+		emitter.off("complete", onComplete);
+	};
+}
+
+/** Clean up buffered logs for an email. */
+export function cleanup(emailId: string): void {
+	emailBuffers.delete(emailId);
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
 
 function timestamp(): string {
 	const now = new Date();
@@ -52,10 +132,14 @@ function formatToolArgs(args: Record<string, unknown>): string {
 	return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
 // Tool execution
+// ---------------------------------------------------------------------------
+
 export function logToolStart(ctx: LogContext, toolName: string, label: string, args: Record<string, unknown>): void {
 	const formattedArgs = formatToolArgs(args);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} -> ${toolName}: ${label}`));
+	const msg = `-> ${toolName}: ${label}`;
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ${msg}`));
 	if (formattedArgs) {
 		const indented = formattedArgs
 			.split("\n")
@@ -63,11 +147,13 @@ export function logToolStart(ctx: LogContext, toolName: string, label: string, a
 			.join("\n");
 		console.log(chalk.dim(indented));
 	}
+	emit("tool", formattedArgs ? `${msg}\n${formattedArgs}` : msg, ctx.emailId);
 }
 
 export function logToolSuccess(ctx: LogContext, toolName: string, durationMs: number, result: string): void {
 	const duration = (durationMs / 1000).toFixed(1);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ok ${toolName} (${duration}s)`));
+	const msg = `ok ${toolName} (${duration}s)`;
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ${msg}`));
 
 	const truncated = truncate(result, 1000);
 	if (truncated) {
@@ -77,11 +163,13 @@ export function logToolSuccess(ctx: LogContext, toolName: string, durationMs: nu
 			.join("\n");
 		console.log(chalk.dim(indented));
 	}
+	emit("tool", truncated ? `${msg}\n${truncated}` : msg, ctx.emailId);
 }
 
 export function logToolError(ctx: LogContext, toolName: string, durationMs: number, error: string): void {
 	const duration = (durationMs / 1000).toFixed(1);
-	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ERR ${toolName} (${duration}s)`));
+	const msg = `ERR ${toolName} (${duration}s)`;
+	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} ${msg}`));
 
 	const truncated = truncate(error, 1000);
 	const indented = truncated
@@ -89,24 +177,38 @@ export function logToolError(ctx: LogContext, toolName: string, durationMs: numb
 		.map((line) => `           ${line}`)
 		.join("\n");
 	console.log(chalk.dim(indented));
+	emit("tool", `${msg}\n${truncated}`, ctx.emailId);
 }
 
+// ---------------------------------------------------------------------------
 // Email events
+// ---------------------------------------------------------------------------
+
 export function logEmailReceived(from: string, subject: string): void {
-	console.log(chalk.green(`${timestamp()} [email] Received from ${from}: ${subject}`));
+	const msg = `Received from ${from}: ${subject}`;
+	console.log(chalk.green(`${timestamp()} [email] ${msg}`));
+	emit("email", msg);
 }
 
 export function logEmailProcessing(from: string, subject: string): void {
-	console.log(chalk.blue(`${timestamp()} [email] Processing from ${from}: ${subject}`));
+	const msg = `Processing from ${from}: ${subject}`;
+	console.log(chalk.blue(`${timestamp()} [email] ${msg}`));
+	emit("email", msg);
 }
 
 export function logEmailReply(to: string, subject: string): void {
-	console.log(chalk.green(`${timestamp()} [email] Reply sent to ${to}: ${subject}`));
+	const msg = `Reply sent to ${to}: ${subject}`;
+	console.log(chalk.green(`${timestamp()} [email] ${msg}`));
+	emit("email", msg);
 }
 
+// ---------------------------------------------------------------------------
 // System
+// ---------------------------------------------------------------------------
+
 export function logInfo(message: string): void {
 	console.log(chalk.blue(`${timestamp()} [system] ${message}`));
+	emit("info", message);
 }
 
 export function logWarning(message: string, details?: string): void {
@@ -118,9 +220,13 @@ export function logWarning(message: string, details?: string): void {
 			.join("\n");
 		console.log(chalk.dim(indented));
 	}
+	emit("warning", details ? `${message}\n${details}` : message);
 }
 
+// ---------------------------------------------------------------------------
 // Usage summary
+// ---------------------------------------------------------------------------
+
 export function logUsageSummary(
 	ctx: LogContext,
 	usage: {
@@ -143,17 +249,19 @@ export function logUsageSummary(
 
 	const summary = lines.join("\n");
 
+	const shortSummary = `${usage.input.toLocaleString()} in + ${usage.output.toLocaleString()} out = $${usage.cost.total.toFixed(4)}`;
 	console.log(chalk.yellow(`${timestamp()} ${formatContext(ctx)} Usage`));
-	console.log(
-		chalk.dim(
-			`           ${usage.input.toLocaleString()} in + ${usage.output.toLocaleString()} out = $${usage.cost.total.toFixed(4)}`,
-		),
-	);
+	console.log(chalk.dim(`           ${shortSummary}`));
+
+	emit("usage", shortSummary, ctx.emailId);
 
 	return summary;
 }
 
+// ---------------------------------------------------------------------------
 // Startup
+// ---------------------------------------------------------------------------
+
 export function logStartup(workingDir: string, sandbox: string): void {
 	console.log("Starting mom email assistant...");
 	console.log(`  Working directory: ${workingDir}`);

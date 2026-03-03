@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { Busboy, type BusboyFileStream, type BusboyHeaders } from "@fastify/busboy";
 import { verifyWebhookSignature } from "./mailgun.js";
@@ -40,6 +41,14 @@ export interface EmailServerConfig {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+function hashMessageId(messageId: string): string {
+	return createHash("sha256").update(messageId).digest("hex").substring(0, 16);
+}
+
+// ============================================================================
 // Server
 // ============================================================================
 
@@ -56,6 +65,13 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 		// Log viewer
 		if (req.url?.startsWith("/logs") && req.method === "GET") {
 			if (handleLogRequest(req, res, config.workspaceToken)) return;
+		}
+
+		// SSE log stream for a specific email
+		const sseMatch = req.url?.match(/^\/api\/email\/([a-f0-9]+)\/logs$/);
+		if (sseMatch && req.method === "GET") {
+			handleEmailLogStream(sseMatch[1], res);
+			return;
 		}
 
 		// Only accept POST to /webhook/mailgun
@@ -108,12 +124,13 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 			}
 
 			const email = fieldsToEmail(fields, attachments);
+			const emailId = hashMessageId(email.messageId);
 
 			log.logEmailReceived(email.from, email.subject);
 
-			// Respond 200 immediately (Mailgun expects quick response)
-			res.writeHead(200, { "Content-Type": "text/plain" });
-			res.end("OK");
+			// Respond 200 with the emailId so clients can subscribe to logs
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: true, emailId }));
 
 			// Process asynchronously
 			config.onEmail(email).catch((err) => {
@@ -141,7 +158,47 @@ export function createEmailServer(config: EmailServerConfig): { start: () => voi
 }
 
 // ============================================================================
-// Helpers
+// SSE log streaming
+// ============================================================================
+
+function handleEmailLogStream(emailId: string, res: ServerResponse): void {
+	res.writeHead(200, {
+		"Content-Type": "text/event-stream",
+		"Cache-Control": "no-cache",
+		"Connection": "keep-alive",
+	});
+
+	// Send any buffered log entries immediately
+	const buffered = log.getBufferedLogs(emailId);
+	for (const entry of buffered) {
+		res.write(`data: ${JSON.stringify(entry)}\n\n`);
+	}
+
+	// Subscribe to new logs and completion
+	const unsubscribe = log.subscribe(
+		(entry) => {
+			if (entry.emailId === emailId) {
+				res.write(`data: ${JSON.stringify(entry)}\n\n`);
+			}
+		},
+		(completedId) => {
+			if (completedId === emailId) {
+				res.write(`event: done\ndata: {}\n\n`);
+				res.end();
+				unsubscribe();
+				setTimeout(() => log.cleanup(emailId), 5000);
+			}
+		},
+	);
+
+	// Clean up if client disconnects early
+	res.on("close", () => {
+		unsubscribe();
+	});
+}
+
+// ============================================================================
+// Parsing helpers
 // ============================================================================
 
 function readBody(req: IncomingMessage): Promise<string> {

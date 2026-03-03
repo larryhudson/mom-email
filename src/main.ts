@@ -97,13 +97,15 @@ const emailStore = new EmailStore(workingDir);
 const sandboxLabel = sandbox.type === "host" ? "host (DANGEROUS)" : `docker:${sandbox.container}`;
 log.logStartup(workingDir, sandboxLabel);
 
-// Validate Mailgun credentials before starting
-try {
-	await validateMailgunCredentials(mailgunConfig);
-} catch (err) {
-	const msg = err instanceof Error ? err.message : String(err);
-	console.error(`Mailgun validation failed: ${msg}`);
-	process.exit(1);
+// Validate Mailgun credentials before starting (skip in dry-run mode)
+if (process.env.IS_DRY_RUN !== "true") {
+	try {
+		await validateMailgunCredentials(mailgunConfig);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.error(`Mailgun validation failed: ${msg}`);
+		process.exit(1);
+	}
 }
 
 // ============================================================================
@@ -111,6 +113,16 @@ try {
 // ============================================================================
 
 const queue = new ProcessingQueue(async (emailId: string) => {
+	log.setCurrentEmail(emailId);
+	try {
+		await processEmail(emailId);
+	} finally {
+		log.emitComplete(emailId);
+		log.clearCurrentEmail();
+	}
+});
+
+async function processEmail(emailId: string): Promise<void> {
 	const email = emailStore.get(emailId);
 	if (!email) {
 		log.logWarning(`Email not found for processing: ${emailId}`);
@@ -223,7 +235,7 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 		const msg = err instanceof Error ? err.message : String(err);
 		log.logWarning(`Failed to process email ${emailId}`, msg);
 	}
-});
+}
 
 // ============================================================================
 // Webhook Handler

@@ -2,31 +2,38 @@
 /**
  * Simple CLI to send test email payloads to the local webhook server.
  *
- * Requires the server to be running with SKIP_SIGNATURE_VERIFICATION=true.
+ * By default, waits for the server to finish processing the email and streams
+ * the server logs in real-time. Use --async to fire-and-forget.
  *
  * Usage:
  *   npx tsx scripts/send-email.ts                     # interactive prompts
  *   npx tsx scripts/send-email.ts --from "Alice <alice@example.com>" --subject "Hello" --body "Hi there"
  *   npx tsx scripts/send-email.ts --reply-to "<msg-id>"  # send as a reply
+ *   npx tsx scripts/send-email.ts --async                # don't wait for processing
  */
 
 import * as readline from "readline";
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "http://localhost:3000/webhook/mailgun";
+const BASE_URL = process.env.WEBHOOK_URL?.replace(/\/webhook\/mailgun$/, "") || "http://localhost:3000";
+const WEBHOOK_URL = `${BASE_URL}/webhook/mailgun`;
+const TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
 
-function parseArgs(argv: string[]): Record<string, string> {
-	const args: Record<string, string> = {};
+function parseArgs(argv: string[]): { flags: Set<string>; opts: Record<string, string> } {
+	const flags = new Set<string>();
+	const opts: Record<string, string> = {};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
-		if (arg.startsWith("--") && i + 1 < argv.length) {
-			args[arg.slice(2)] = argv[++i];
+		if (arg === "--async") {
+			flags.add("async");
+		} else if (arg.startsWith("--") && i + 1 < argv.length) {
+			opts[arg.slice(2)] = argv[++i];
 		}
 	}
-	return args;
+	return { flags, opts };
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +79,12 @@ function createPrompt(): {
 // Send email
 // ---------------------------------------------------------------------------
 
-async function sendEmail(opts: { from: string; subject: string; body: string; replyTo?: string }) {
+async function sendEmail(opts: {
+	from: string;
+	subject: string;
+	body: string;
+	replyTo?: string;
+}): Promise<string | undefined> {
 	const sender = opts.from.match(/<(.+)>/)?.[1] || opts.from;
 	const messageId = `<test-${Date.now()}@example.com>`;
 
@@ -103,11 +115,107 @@ async function sendEmail(opts: { from: string; subject: string; body: string; re
 	});
 
 	const text = await res.text();
+
+	// Try to parse JSON response with emailId
+	let emailId: string | undefined;
+	try {
+		const json = JSON.parse(text);
+		emailId = json.emailId;
+	} catch {
+		// Old-style plain-text response
+	}
+
 	console.log();
 	console.log(`  Status:     ${res.status} ${res.statusText}`);
-	console.log(`  Response:   ${text}`);
 	console.log(`  Message-Id: ${messageId}`);
+	if (emailId) {
+		console.log(`  Email ID:   ${emailId}`);
+	}
 	console.log();
+
+	return emailId;
+}
+
+// ---------------------------------------------------------------------------
+// SSE log streaming
+// ---------------------------------------------------------------------------
+
+function formatLogEntry(entry: { level: string; message: string }): string {
+	const prefix: Record<string, string> = {
+		info: "[system]",
+		warning: "[system] WARNING",
+		email: "[email]",
+		tool: "[agent]",
+		usage: "[usage]",
+	};
+	return `  ${prefix[entry.level] || `[${entry.level}]`} ${entry.message}`;
+}
+
+async function streamLogs(emailId: string): Promise<void> {
+	const url = `${BASE_URL}/api/email/${emailId}/logs`;
+
+	const controller = new AbortController();
+	const timeout = setTimeout(() => {
+		console.log(`\n  Timed out after ${TIMEOUT_MS / 1000}s waiting for processing to complete.`);
+		controller.abort();
+	}, TIMEOUT_MS);
+
+	try {
+		const res = await fetch(url, {
+			headers: { Accept: "text/event-stream" },
+			signal: controller.signal,
+		});
+
+		if (!res.ok || !res.body) {
+			console.error(`  Failed to connect to log stream: ${res.status} ${res.statusText}`);
+			return;
+		}
+
+		console.log("  Waiting for processing...");
+		console.log("  ─────────────────────────");
+
+		const decoder = new TextDecoder();
+		let buffer = "";
+
+		for await (const chunk of res.body) {
+			buffer += decoder.decode(chunk as BufferSource, { stream: true });
+
+			// Parse SSE events (separated by double newlines)
+			const parts = buffer.split("\n\n");
+			buffer = parts.pop()!; // Keep incomplete event in buffer
+
+			for (const part of parts) {
+				if (!part.trim()) continue;
+
+				// Check for "done" event
+				if (part.includes("event: done")) {
+					console.log("  ─────────────────────────");
+					console.log("  Processing complete.");
+					console.log();
+					return;
+				}
+
+				// Parse data lines
+				const dataLines = part.split("\n")
+					.filter((line) => line.startsWith("data: "))
+					.map((line) => line.substring(6));
+
+				for (const data of dataLines) {
+					try {
+						const entry = JSON.parse(data);
+						console.log(formatLogEntry(entry));
+					} catch {
+						// Skip unparseable entries
+					}
+				}
+			}
+		}
+	} catch (err: unknown) {
+		if (err instanceof Error && err.name === "AbortError") return;
+		throw err;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -115,16 +223,20 @@ async function sendEmail(opts: { from: string; subject: string; body: string; re
 // ---------------------------------------------------------------------------
 
 async function main() {
-	const args = parseArgs(process.argv.slice(2));
+	const { flags, opts: args } = parseArgs(process.argv.slice(2));
+	const isAsync = flags.has("async");
 
 	// If all required fields are provided via flags, send directly
 	if (args.from && args.subject && args.body) {
-		await sendEmail({
+		const emailId = await sendEmail({
 			from: args.from,
 			subject: args.subject,
 			body: args.body,
 			replyTo: args["reply-to"],
 		});
+		if (!isAsync && emailId) {
+			await streamLogs(emailId);
+		}
 		return;
 	}
 
@@ -143,7 +255,10 @@ async function main() {
 
 	prompt.close();
 
-	await sendEmail({ from, subject, body, replyTo: replyTo || undefined });
+	const emailId = await sendEmail({ from, subject, body, replyTo: replyTo || undefined });
+	if (!isAsync && emailId) {
+		await streamLogs(emailId);
+	}
 }
 
 main().catch((err) => {
