@@ -289,15 +289,16 @@ async function handleIncomingEmail(parsed: ParsedEmail): Promise<void> {
 // Events Watcher
 // ============================================================================
 
-const eventsWatcher = createEventsWatcher(workingDir, (text: string, _filename: string): boolean => {
+const eventsWatcher = createEventsWatcher(workingDir, (text: string, filename: string): boolean => {
 	// Create a synthetic triggered email for the event
+	const eventName = filename.replace(/\.json$/, "");
 	const eventId = `event_${Date.now()}`;
 	const syntheticEmail: StoredEmail = {
 		id: eventId,
 		messageId: `<${eventId}@events>`,
 		from: ALLOWED_USER_EMAIL || "system@events",
 		to: mailgunFromAddress,
-		subject: "Scheduled Event",
+		subject: eventName,
 		date: new Date().toISOString(),
 		receivedAt: new Date().toISOString(),
 		bodyPlain: text,
