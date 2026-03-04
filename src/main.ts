@@ -119,8 +119,8 @@ const queue = new ProcessingQueue(async (emailId: string) => {
 
 	log.logEmailProcessing(email.from, email.subject);
 
-	// Gather recent context emails (last 50 emails for context)
-	const recentEntries = emailStore.getRecent({ limit: 50 });
+	// Gather recent context emails (last 5 emails for context)
+	const recentEntries = emailStore.getRecent({ limit: 5 });
 	const recentIds = recentEntries
 		.filter((e) => e.id !== emailId)
 		.map((e) => e.id);
